@@ -1,13 +1,10 @@
-from __future__ import absolute_import, unicode_literals
-
 from contextlib import contextmanager
+from unittest.mock import Mock, PropertyMock, patch, sentinel
 
 import pytest
-from case import Mock, patch, sentinel
 
 from celery import canvas, group, result, uuid
 from celery.exceptions import ChordError, Retry
-from celery.five import range
 from celery.result import AsyncResult, EagerResult, GroupResult
 
 
@@ -234,7 +231,13 @@ class test_unlock_chord_task(ChordCase):
 
         with patch.object(ch, 'run') as run:
             ch.apply_async(task_id=sentinel.task_id)
-            run.assert_called_once_with(group(mul.s(1, 1), mul.s(2, 2)), mul.s(), (), task_id=sentinel.task_id, interval=10)
+            run.assert_called_once_with(
+                group(mul.s(1, 1), mul.s(2, 2)),
+                mul.s(),
+                (),
+                task_id=sentinel.task_id,
+                interval=10,
+            )
 
 
 class test_chord(ChordCase):
@@ -291,9 +294,8 @@ class test_add_to_chord:
             return self.add_to_chord(sig, lazy)
         self.adds = adds
 
+    @patch('celery.Celery.backend', new=PropertyMock(name='backend'))
     def test_add_to_chord(self):
-        self.app.backend = Mock(name='backend')
-
         sig = self.add.s(2, 2)
         sig.delay = Mock(name='sig.delay')
         self.adds.request.group = uuid()
@@ -330,8 +332,8 @@ class test_add_to_chord:
 
 class test_Chord_task(ChordCase):
 
+    @patch('celery.Celery.backend', new=PropertyMock(name='backend'))
     def test_run(self):
-        self.app.backend = Mock()
         self.app.backend.cleanup = Mock()
         self.app.backend.cleanup.__name__ = 'cleanup'
         Chord = self.app.tasks['celery.chord']

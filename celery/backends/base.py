@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Result backend base classes.
 
 - :class:`BaseBackend` defines the interface.
@@ -6,14 +5,11 @@
 - :class:`KeyValueStoreBackend` is a common base class
     using K/V semantics like _get and _put.
 """
-from __future__ import absolute_import, unicode_literals
-from future.utils import raise_with_traceback
-
-from datetime import datetime, timedelta
 import sys
 import time
 import warnings
 from collections import namedtuple
+from datetime import datetime, timedelta
 from functools import partial
 from weakref import WeakValueDictionary
 
@@ -26,10 +22,9 @@ from kombu.utils.url import maybe_sanitize_url
 import celery.exceptions
 from celery import current_app, group, maybe_signature, states
 from celery._state import get_current_task
-from celery.exceptions import (ChordError, ImproperlyConfigured,
-                               NotRegistered, TaskRevokedError, TimeoutError,
-                               BackendGetMetaError, BackendStoreError)
-from celery.five import PY3, items
+from celery.exceptions import (BackendGetMetaError, BackendStoreError,
+                               ChordError, ImproperlyConfigured,
+                               NotRegistered, TaskRevokedError, TimeoutError)
 from celery.result import (GroupResult, ResultBase, ResultSet,
                            allow_join_result, result_from_tuple)
 from celery.utils.collections import BufferMap
@@ -38,7 +33,8 @@ from celery.utils.log import get_logger
 from celery.utils.serialization import (create_exception_cls,
                                         ensure_serializable,
                                         get_pickleable_exception,
-                                        get_pickled_exception)
+                                        get_pickled_exception,
+                                        raise_with_context)
 from celery.utils.time import get_exponential_backoff_interval
 
 __all__ = ('BaseBackend', 'KeyValueStoreBackend', 'DisabledBackend')
@@ -80,7 +76,7 @@ class _nulldict(dict):
     __setitem__ = update = setdefault = ignore
 
 
-class Backend(object):
+class Backend:
     READY_STATES = states.READY_STATES
     UNREADY_STATES = states.UNREADY_STATES
     EXCEPTION_STATES = states.EXCEPTION_STATES
@@ -265,18 +261,14 @@ class Backend(object):
             self.mark_as_failure(task_id, exc, exception_info.traceback)
             return exception_info
         finally:
-            if sys.version_info >= (3, 5, 0):
-                while tb is not None:
-                    try:
-                        tb.tb_frame.clear()
-                        tb.tb_frame.f_locals
-                    except RuntimeError:
-                        # Ignore the exception raised if the frame is still executing.
-                        pass
-                    tb = tb.tb_next
-
-            elif (2, 7, 0) <= sys.version_info < (3, 0, 0):
-                sys.exc_clear()
+            while tb is not None:
+                try:
+                    tb.tb_frame.clear()
+                    tb.tb_frame.f_locals
+                except RuntimeError:
+                    # Ignore the exception raised if the frame is still executing.
+                    pass
+                tb = tb.tb_next
 
             del tb
 
@@ -317,7 +309,7 @@ class Backend(object):
                     else:
                         exc = cls(exc_msg)
                 except Exception as err:  # noqa
-                    exc = Exception('{}({})'.format(cls, exc_msg))
+                    exc = Exception(f'{cls}({exc_msg})')
             if self.serializer in EXCEPTION_ABLE_CODECS:
                 exc = get_pickled_exception(exc)
         return exc
@@ -346,7 +338,7 @@ class Backend(object):
     def decode(self, payload):
         if payload is None:
             return payload
-        payload = PY3 and payload or str(payload)
+        payload = payload or str(payload)
         return loads(payload,
                      content_type=self.content_type,
                      content_encoding=self.content_encoding,
@@ -454,7 +446,9 @@ class Backend(object):
                             self.max_sleep_between_retries_ms, True) / 1000
                         self._sleep(sleep_amount)
                     else:
-                        raise_with_traceback(BackendStoreError("failed to store result on the backend", task_id=task_id, state=state))
+                        raise_with_context(
+                            BackendStoreError("failed to store result on the backend", task_id=task_id, state=state),
+                        )
                 else:
                     raise
 
@@ -532,7 +526,9 @@ class Backend(object):
                             self.max_sleep_between_retries_ms, True) / 1000
                         self._sleep(sleep_amount)
                     else:
-                        raise_with_traceback(BackendGetMetaError("failed to get meta", task_id=task_id))
+                        raise_with_context(
+                            BackendGetMetaError("failed to get meta", task_id=task_id),
+                        )
                 else:
                     raise
 
@@ -623,7 +619,7 @@ class Backend(object):
         return (unpickle_backend, (self.__class__, args, kwargs))
 
 
-class SyncBackendMixin(object):
+class SyncBackendMixin:
     def iter_native(self, result, timeout=None, interval=0.5, no_ack=True,
                     on_message=None, on_interval=None):
         self._ensure_not_eager()
@@ -638,12 +634,11 @@ class SyncBackendMixin(object):
             else:
                 task_ids.add(result.id)
 
-        for task_id, meta in self.get_many(
+        yield from self.get_many(
             task_ids,
             timeout=timeout, interval=interval, no_ack=no_ack,
             on_message=on_message, on_interval=on_interval,
-        ):
-            yield task_id, meta
+        )
 
     def wait_for_pending(self, result, timeout=None, interval=0.5,
                          no_ack=True, on_message=None, on_interval=None,
@@ -720,7 +715,7 @@ class BaseKeyValueStoreBackend(Backend):
         if hasattr(self.key_t, '__func__'):  # pragma: no cover
             self.key_t = self.key_t.__func__  # remove binding
         self._encode_prefixes()
-        super(BaseKeyValueStoreBackend, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         if self.implements_incr:
             self.apply_chord = self._apply_chord_incr
 
@@ -791,7 +786,7 @@ class BaseKeyValueStoreBackend(Backend):
             # client returns dict so mapping preserved.
             return {
                 self._strip_prefix(k): v
-                for k, v in self._filter_ready(items(values), READY_STATES)
+                for k, v in self._filter_ready(values.items(), READY_STATES)
             }
         else:
             # client returns list so need to recreate mapping.
@@ -825,12 +820,12 @@ class BaseKeyValueStoreBackend(Backend):
                                                  for k in keys]), keys, READY_STATES)
             cache.update(r)
             ids.difference_update({bytes_to_str(v) for v in r})
-            for key, value in items(r):
+            for key, value in r.items():
                 if on_message is not None:
                     on_message(value)
                 yield bytes_to_str(key), value
             if timeout and iterations * interval >= timeout:
-                raise TimeoutError('Operation timed out ({0})'.format(timeout))
+                raise TimeoutError(f'Operation timed out ({timeout})')
             if on_interval:
                 on_interval()
             time.sleep(interval)  # don't busy loop.
@@ -907,7 +902,7 @@ class BaseKeyValueStoreBackend(Backend):
             logger.exception('Chord %r raised: %r', gid, exc)
             return self.chord_error_from_stack(
                 callback,
-                ChordError('Cannot restore group: {0!r}'.format(exc)),
+                ChordError(f'Cannot restore group: {exc!r}'),
             )
         if deps is None:
             try:
@@ -917,10 +912,14 @@ class BaseKeyValueStoreBackend(Backend):
                 logger.exception('Chord callback %r raised: %r', gid, exc)
                 return self.chord_error_from_stack(
                     callback,
-                    ChordError('GroupResult {0} no longer exists'.format(gid)),
+                    ChordError(f'GroupResult {gid} no longer exists'),
                 )
         val = self.incr(key)
-        size = len(deps)
+        # Set the chord size to the value defined in the request, or fall back
+        # to the number of dependencies we can see from the restored result
+        size = request.chord.get("chord_size")
+        if size is None:
+            size = len(deps)
         if val > size:  # pragma: no cover
             logger.warning('Chord counter incremented too many times for %r',
                            gid)
@@ -948,7 +947,7 @@ class BaseKeyValueStoreBackend(Backend):
                     logger.exception('Chord %r raised: %r', gid, exc)
                     self.chord_error_from_stack(
                         callback,
-                        ChordError('Callback error: {0!r}'.format(exc)),
+                        ChordError(f'Callback error: {exc!r}'),
                     )
             finally:
                 deps.delete()

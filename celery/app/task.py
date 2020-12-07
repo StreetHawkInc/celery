@@ -1,7 +1,4 @@
-# -*- coding: utf-8 -*-
 """Task implementation: request context and the task base class."""
-from __future__ import absolute_import, unicode_literals
-
 import sys
 
 from billiard.einfo import ExceptionInfo
@@ -11,10 +8,9 @@ from kombu.utils.uuid import uuid
 
 from celery import current_app, group, states
 from celery._state import _task_stack
-from celery.canvas import signature
+from celery.canvas import _chain, signature
 from celery.exceptions import (Ignore, ImproperlyConfigured,
                                MaxRetriesExceededError, Reject, Retry)
-from celery.five import items, python_2_unicode_compatible
 from celery.local import class_property
 from celery.result import EagerResult, denied_join_result
 from celery.utils import abstract
@@ -22,6 +18,7 @@ from celery.utils.functional import mattrgetter, maybe_list
 from celery.utils.imports import instantiate
 from celery.utils.nodenames import gethostname
 from celery.utils.serialization import raise_with_context
+
 from .annotations import resolve_all as resolve_all_annotations
 from .registry import _unpickle_task_v2
 from .utils import appstr
@@ -46,7 +43,7 @@ TaskType = type
 
 def _strflags(flags, default=''):
     if flags:
-        return ' ({0})'.format(', '.join(flags))
+        return ' ({})'.format(', '.join(flags))
     return default
 
 
@@ -61,8 +58,7 @@ def _reprtask(task, fmt=None, flags=None):
     )
 
 
-@python_2_unicode_compatible
-class Context(object):
+class Context:
     """Task request variables (Task.request)."""
 
     logfile = None
@@ -83,6 +79,7 @@ class Context(object):
     correlation_id = None
     taskset = None   # compat alias to group
     group = None
+    group_index = None
     chord = None
     chain = None
     utc = None
@@ -107,7 +104,7 @@ class Context(object):
         return getattr(self, key, default)
 
     def __repr__(self):
-        return '<Context: {0!r}>'.format(vars(self))
+        return '<Context: {!r}>'.format(vars(self))
 
     def as_execution_options(self):
         limit_hard, limit_soft = self.timelimit or (None, None)
@@ -116,6 +113,7 @@ class Context(object):
             'root_id': self.root_id,
             'parent_id': self.parent_id,
             'group_id': self.group,
+            'group_index': self.group_index,
             'chord': self.chord,
             'chain': self.chain,
             'link': self.callbacks,
@@ -138,8 +136,7 @@ class Context(object):
 
 
 @abstract.CallableTask.register
-@python_2_unicode_compatible
-class Task(object):
+class Task:
     """Task base class.
 
     Note:
@@ -369,7 +366,7 @@ class Task(object):
     @classmethod
     def annotate(cls):
         for d in resolve_all_annotations(cls.app.annotations, cls):
-            for key, value in items(d):
+            for key, value in d.items():
                 if key.startswith('@'):
                     cls.add_around(key[1:], value)
                 else:
@@ -678,6 +675,8 @@ class Task(object):
         """
         request = self.request
         retries = request.retries + 1
+        if max_retries is not None:
+            self.override_max_retries = max_retries
         max_retries = self.max_retries if max_retries is None else max_retries
 
         # Not in worker or emulated by (apply/always_eager),
@@ -703,7 +702,7 @@ class Task(object):
                 # the exc' argument provided (raise exc from orig)
                 raise_with_context(exc)
             raise self.MaxRetriesExceededError(
-                "Can't retry {0}[{1}] args:{2} kwargs:{3}".format(
+                "Can't retry {}[{}] args:{} kwargs:{}".format(
                     self.name, request.id, S.args, S.kwargs
                 ), task_args=S.args, task_kwargs=S.kwargs
             )
@@ -883,14 +882,31 @@ class Task(object):
                 link=self.request.callbacks,
                 link_error=self.request.errbacks,
             )
+        elif isinstance(sig, _chain):
+            if not sig.tasks:
+                raise ImproperlyConfigured(
+                    "Cannot replace with an empty chain"
+                )
 
         if self.request.chain:
+            # We need to freeze the new signature with the current task's ID to
+            # ensure that we don't disassociate the new chain from the existing
+            # task IDs which would break previously constructed results
+            # objects.
+            sig.freeze(self.request.id)
+            if "link" in sig.options:
+                final_task_links = sig.tasks[-1].options.setdefault("link", [])
+                final_task_links.extend(maybe_list(sig.options["link"]))
+            # Construct the new remainder of the task by chaining the signature
+            # we're being replaced by with signatures constructed from the
+            # chain elements in the current request.
             for t in reversed(self.request.chain):
                 sig |= signature(t, app=self.app)
 
         sig.set(
             chord=chord,
             group_id=self.request.group,
+            group_index=self.request.group_index,
             root_id=self.request.root_id,
         )
         sig.freeze(self.request.id)
@@ -917,6 +933,7 @@ class Task(object):
             raise ValueError('Current task is not member of any chord')
         sig.set(
             group_id=self.request.group,
+            group_index=self.request.group_index,
             chord=self.request.chord,
             root_id=self.request.root_id,
         )

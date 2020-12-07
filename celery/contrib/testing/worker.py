@@ -1,6 +1,4 @@
 """Embedded workers for integration tests."""
-from __future__ import absolute_import, unicode_literals
-
 import os
 import threading
 from contextlib import contextmanager
@@ -32,7 +30,7 @@ class TestWorkController(worker.WorkController):
     def __init__(self, *args, **kwargs):
         # type: (*Any, **Any) -> None
         self._on_started = threading.Event()
-        super(TestWorkController, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
     def on_consumer_ready(self, consumer):
         # type: (celery.worker.consumer.Consumer) -> None
@@ -53,16 +51,17 @@ class TestWorkController(worker.WorkController):
 
 
 @contextmanager
-def start_worker(app,
-                 concurrency=1,
-                 pool='solo',
-                 loglevel=WORKER_LOGLEVEL,
-                 logfile=None,
-                 perform_ping_check=True,
-                 ping_task_timeout=10.0,
-                 **kwargs):
-    # type: (Celery, int, str, Union[str, int],
-    #        str, bool, float, **Any) -> # Iterable
+def start_worker(
+    app,  # type: Celery
+    concurrency=1,  # type: int
+    pool='solo',  # type: str
+    loglevel=WORKER_LOGLEVEL,  # type: Union[str, int]
+    logfile=None,  # type: str
+    perform_ping_check=True,  # type: bool
+    ping_task_timeout=10.0,  # type: float
+    **kwargs  # type: Any
+):
+    # type: (...) -> Iterable
     """Start embedded worker.
 
     Yields:

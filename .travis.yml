@@ -1,27 +1,36 @@
 language: python
-dist: focal
+dist: bionic
 cache: pip
 python:
-  - '2.7'
-  - '3.5'
   - '3.6'
   - '3.7'
   - '3.8'
+  - '3.9'
 os:
     - linux
 stages:
   - test
   - integration
   - lint
+services:
+  - redis
+  - docker
 env:
   global:
   - PYTHONUNBUFFERED=yes
-  matrix:
+  - CELERY_TOX_PARALLEL=
+  jobs:
   - MATRIX_TOXENV=unit
 
-matrix:
+jobs:
   fast_finish: true
+  allow_failures:
+  - python: '3.9'
   include:
+  - python: '3.9'
+    env: MATRIX_TOXENV=integration-rabbitmq
+    stage: integration
+
   - python: 3.8
     env: MATRIX_TOXENV=integration-rabbitmq
     stage: integration
@@ -50,51 +59,24 @@ matrix:
     env: MATRIX_TOXENV=integration-elasticsearch
     stage: integration
 
-  - python: '3.8'
-    env: TOXENV=flake8
-    stage: lint
-  - python: '3.8'
-    env: TOXENV=apicheck
-    stage: lint
-  - python: '3.8'
-    env: TOXENV=configcheck
-    stage: lint
-  - python: '3.8'
-    env: TOXENV=bandit
-    stage: lint
-  - python: '3.8'
-    env: TOXENV=pydocstyle
-    stage: lint
-  - python: '2.7'
-    env: TOXENV=flakeplus
+  - python: '3.9'
+    env:
+      - TOXENV=flake8,apicheck,configcheck,bandit
+      - CELERY_TOX_PARALLEL='--parallel --parallel-live'
     stage: lint
 
-  allow_failures:
-  - python: pypy2.7-7.3
-    env: TOXENV=pypy
-    before_install: sudo apt-get update && sudo apt-get install libgnutls-dev
-    stage: test
-  - python: pypy3.6-7.3
-    env: TOXENV=pypy3
-    before_install: sudo apt-get update && sudo apt-get install libgnutls-dev
+  - python: pypy3.6-7.3.1
+    env: TOXENV=pypy3-unit
     stage: test
 
 before_install:
-    - sudo mkdir -p /var/log/celery
-    - sudo mkdir -p /var/run/celery
-    - sudo chown travis /var/log/celery
-    - sudo chown travis /var/run/celery
-    - sudo apt install libcurl4-openssl-dev libssl-dev gnutls-dev
+    - sudo install --directory --owner=travis /var/log/celery /var/run/celery
+    - sudo apt install libcurl4-openssl-dev libssl-dev gnutls-dev httping expect
     - if [[ -v MATRIX_TOXENV ]]; then export TOXENV=${TRAVIS_PYTHON_VERSION}-${MATRIX_TOXENV}; fi; env
     - |
-          if [[ "$TOXENV" == *integration* ]]; then
-              sudo echo 'deb https://dl.bintray.com/rabbitmq-erlang/debian focal main' > /etc/apt/sources.list.d/rabbitmq-bintray.list
-              sudo apt-key adv --keyserver "hkps.pool.sks-keyservers.net" --recv-keys "0x6B73A36E6026DFCA"
-              wget -O - "https://github.com/rabbitmq/signing-keys/releases/download/2.0/rabbitmq-release-signing-key.asc" | sudo apt-key add -
-              sudo apt update
-              sudo apt install rabbitmq-server -y
-              sudo systemctl enable rabbitmq-server
-              sudo systemctl start rabbitmq-server
+          if [[ "$TOXENV" == *rabbitmq ]]; then
+              docker run -d -p 5672:5672 -p 15672:15672 rabbitmq:3.8-management
+              while ! httping -c1 http://127.0.0.1:15672; do sleep 10; done
           fi
     - |
           if [[ "$TOXENV" =~ "pypy" ]]; then
@@ -111,13 +93,13 @@ before_install:
           fi
     - |
           if [[ "$TOXENV" == *dynamodb ]]; then
-              docker run -d -p 8000:8000 dwmkerr/dynamodb:38 -inMemory
-              while ! nc -zv 127.0.0.1 8000; do sleep 10; done
+              docker run -d -p 8000:8000 amazon/dynamodb-local
+              while ! httping -c1 http://127.0.0.1:8000; do sleep 10; done
           fi
     - |
           if [[ "$TOXENV" == *cache ]]; then
               docker run -d -p 11211:11211 memcached:alpine
-              while ! nc -zv 127.0.0.1 11211; do sleep 1; done
+              while ! ./extra/travis/is-memcached-running 127.0.0.1 11211; do sleep 1; done
           fi
     - |
           if [[ "$TOXENV" == *cassandra ]]; then
@@ -135,20 +117,20 @@ before_install:
           fi
     - |
           docker run -d -e executable=blob -t -p 10000:10000 --tmpfs /opt/azurite/folder:rw arafato/azurite:2.6.5
-          while ! nc -zv 127.0.0.1 10000; do sleep 10; done
+          while ! httping -c1 http://127.0.0.1:10000; do sleep 10; done
           export AZUREBLOCKBLOB_URL="azureblockblob://DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;"
     - |
           wget -qO - https://packages.couchbase.com/ubuntu/couchbase.key | sudo apt-key add -
           sudo apt-add-repository -y 'deb http://packages.couchbase.com/ubuntu bionic bionic/main'
           sudo apt-get update && sudo apt-get install -y libcouchbase-dev
+install: pip --disable-pip-version-check install --upgrade-strategy eager -U tox | cat
+script: tox $CELERY_TOX_PARALLEL -v -- -v
 after_success:
   - |
           if [[ -v MATRIX_TOXENV || "$TOXENV" =~ "pypy" ]]; then
               .tox/$TOXENV/bin/coverage xml
               .tox/$TOXENV/bin/codecov -e TOXENV
           fi;
-install: pip --disable-pip-version-check install --upgrade-strategy eager -U tox | cat
-script: tox -v -- -v
 notifications:
   email: false
   irc:
@@ -156,7 +138,3 @@ notifications:
       - "chat.freenode.net#celery"
     on_success: change
     on_failure: change
-services:
-    - rabbitmq
-    - redis
-    - docker

@@ -1,29 +1,20 @@
-from __future__ import absolute_import, unicode_literals
+from unittest.mock import Mock, patch
 
 import pytest
-from case import Mock, patch
+from billiard.einfo import ExceptionInfo
 from kombu.exceptions import EncodeError
 
 from celery import group, signals, states, uuid
 from celery.app.task import Context
-from celery.app.trace import (
-    TraceInfo,
-    _fast_trace_task,
-    _trace_task_ret,
-    build_tracer,
-    get_log_policy,
-    get_task_name,
-    log_policy_expected,
-    log_policy_ignore,
-    log_policy_internal,
-    log_policy_reject,
-    log_policy_unexpected,
-    reset_worker_optimizations,
-    setup_worker_optimizations,
-    trace_task,
-    traceback_clear,
-)
-
+from celery.app.trace import (TraceInfo, _fast_trace_task, _trace_task_ret,
+                              build_tracer, get_log_policy, get_task_name,
+                              log_policy_expected, log_policy_ignore,
+                              log_policy_internal, log_policy_reject,
+                              log_policy_unexpected,
+                              reset_worker_optimizations,
+                              setup_worker_optimizations, trace_task,
+                              traceback_clear)
+from celery.backends.base import BaseDictBackend
 from celery.exceptions import Ignore, Reject, Retry
 
 
@@ -157,6 +148,18 @@ class test_trace(TraceCase):
         with pytest.raises(MemoryError):
             self.trace(add, (2, 2), {}, eager=False)
 
+    def test_when_backend_raises_exception(self):
+        @self.app.task(shared=False)
+        def add(x, y):
+            return x + y
+
+        add.backend = Mock(name='backend')
+        add.backend.mark_as_done.side_effect = Exception()
+        add.backend.mark_as_failure.side_effect = Exception("failed mark_as_failure")
+
+        with pytest.raises(Exception):
+            self.trace(add, (2, 2), {}, eager=False)
+
     def test_traceback_clear(self):
         import inspect
         import sys
@@ -173,42 +176,33 @@ class test_trace(TraceCase):
         except KeyError as exc:
             traceback_clear(exc)
 
-            if sys.version_info >= (3, 5, 0):
-                tb_ = exc.__traceback__
-                while tb_ is not None:
-                    if str(tb_.tb_frame.__repr__) == frame_list[0]:
-                        assert len(tb_.tb_frame.f_locals) == 0
-                    tb_ = tb_.tb_next
-            elif (2, 7, 0) <= sys.version_info < (3, 0, 0):
-                sys.exc_clear.assert_called()
+            tb_ = exc.__traceback__
+            while tb_ is not None:
+                if str(tb_.tb_frame.__repr__) == frame_list[0]:
+                    assert len(tb_.tb_frame.f_locals) == 0
+                tb_ = tb_.tb_next
 
         try:
             raise_dummy()
         except KeyError as exc:
             traceback_clear()
 
-            if sys.version_info >= (3, 5, 0):
-                tb_ = exc.__traceback__
-                while tb_ is not None:
-                    if str(tb_.tb_frame.__repr__) == frame_list[0]:
-                        assert len(tb_.tb_frame.f_locals) == 0
-                    tb_ = tb_.tb_next
-            elif (2, 7, 0) <= sys.version_info < (3, 0, 0):
-                sys.exc_clear.assert_called()
+            tb_ = exc.__traceback__
+            while tb_ is not None:
+                if str(tb_.tb_frame.__repr__) == frame_list[0]:
+                    assert len(tb_.tb_frame.f_locals) == 0
+                tb_ = tb_.tb_next
 
         try:
             raise_dummy()
         except KeyError as exc:
             traceback_clear(str(exc))
 
-            if sys.version_info >= (3, 5, 0):
-                tb_ = exc.__traceback__
-                while tb_ is not None:
-                    if str(tb_.tb_frame.__repr__) == frame_list[0]:
-                        assert len(tb_.tb_frame.f_locals) == 0
-                    tb_ = tb_.tb_next
-            elif (2, 7, 0) <= sys.version_info < (3, 0, 0):
-                sys.exc_clear.assert_called()
+            tb_ = exc.__traceback__
+            while tb_ is not None:
+                if str(tb_.tb_frame.__repr__) == frame_list[0]:
+                    assert len(tb_.tb_frame.f_locals) == 0
+                tb_ = tb_.tb_next
 
     @patch('celery.app.trace.traceback_clear')
     def test_when_Ignore(self, mock_traceback_clear):
@@ -381,6 +375,27 @@ class test_trace(TraceCase):
         assert report_internal_error.call_count
         assert send.call_count
         assert xtask.__trace__ is tracer
+
+    def test_backend_error_should_report_failure(self):
+        """check internal error is reported as failure.
+
+        In case of backend error, an exception may bubble up from trace and be
+        caught by trace_task.
+        """
+
+        @self.app.task(shared=False)
+        def xtask():
+            pass
+
+        xtask.backend = BaseDictBackend(app=self.app)
+        xtask.backend.mark_as_done = Mock()
+        xtask.backend.mark_as_done.side_effect = Exception()
+        xtask.backend.mark_as_failure = Mock()
+        xtask.backend.mark_as_failure.side_effect = Exception()
+
+        ret, info, _, _ = trace_task(xtask, 'uuid', (), {}, app=self.app)
+        assert info is not None
+        assert isinstance(ret, ExceptionInfo)
 
 
 class test_TraceInfo(TraceCase):
